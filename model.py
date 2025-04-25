@@ -1,12 +1,14 @@
-import time
 import torch
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
 from torch.optim import AdamW
+from torch.nn import CrossEntropyLoss
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
+from sklearn.utils.class_weight import compute_class_weight
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, AutoConfig
+import time
 
 def preprocess(text):
     new_text = []
@@ -15,6 +17,27 @@ def preprocess(text):
         t = 'http' if t.startswith('http') else t
         new_text.append(t)
     return " ".join(new_text)
+
+def add_backtranslated_data(train_df, pos_num=0, neg_num=0):
+    pos_df = pd.read_csv("./data/backtranslated_pos.csv")
+    neg_df = pd.read_csv("./data/backtranslated_neg.csv")
+
+    pos_sampled = pos_df.sample(n=pos_num, random_state=42)
+    neg_sampled = neg_df.sample(n=neg_num, random_state=42)
+
+    aug_df = pd.concat([pos_sampled, neg_sampled], ignore_index=True)
+
+    aug_df['clean_sentence'] = aug_df['sentence'].astype(str).apply(preprocess)
+    aug_df['label_id'] = aug_df['label'].map(label2id)
+
+    if not aug_df.empty:
+        aug_df['clean_sentence'] = aug_df['sentence'].astype(str).apply(preprocess)
+        aug_df['label_id'] = aug_df['label'].map(label2id)
+        combined_df = pd.concat([train_df, aug_df], ignore_index=True)
+    else:
+        combined_df = train_df
+        
+    return combined_df
 
 class SentimentDataset(Dataset):
     def __init__(self, encodings, labels):
@@ -33,7 +56,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(42)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(42)
-    
+
 #data
 label2id = {"negative": 0, "neutral": 1, "positive": 2}
 id2label = {v: k for k, v in label2id.items()}
@@ -43,8 +66,11 @@ test_df = pd.read_csv("./data/test.csv")
 
 train_df["label_id"] = train_df["label"].map(label2id)
 train_df['clean_sentence'] = train_df['sentence'].astype(str).apply(preprocess)
+
 test_df['clean_sentence'] = test_df['sentence'].astype(str).apply(preprocess)
 
+#31039 pos and 21910 neg
+train_df = add_backtranslated_data(train_df, pos_num=0, neg_num=0)
 train_texts, val_texts, train_labels, val_labels = train_test_split(
     train_df["clean_sentence"].tolist(),
     train_df["label_id"].tolist(),
@@ -54,14 +80,14 @@ train_texts, val_texts, train_labels, val_labels = train_test_split(
 )
 test_text = test_df['clean_sentence'].tolist()
 
-#parameters
+#config
 freeze_num = 9
-lr = 5e-6
+l_rate =  5e-6
 epochs = 3
-model_name = "vinai/bertweet-large" #"siebert/sentiment-roberta-large-english", "microsoft/deberta-v3-large"
+model_name = "bertweet"
+MODEL = "vinai/bertweet-large"
 
 #model
-MODEL = model_name
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
 config = AutoConfig.from_pretrained(MODEL)
 model = AutoModelForSequenceClassification.from_pretrained(
@@ -91,28 +117,38 @@ test_dataset = torch.utils.data.TensorDataset(
     test_encodings['attention_mask']
 )
 
-optimizer = AdamW(model.parameters(), lr=lr)
+optimizer = AdamW(model.parameters(), lr=l_rate)
 
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=64)
 test_loader = DataLoader(test_dataset, batch_size=64)
 
 #train
+class_weights = compute_class_weight(
+    class_weight='balanced',
+    classes=np.unique(train_labels),
+    y=train_labels
+)
+class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
+loss_fn = CrossEntropyLoss(weight=class_weights) 
+        
 model.train()
 for epoch in range(epochs):
     loop = tqdm(train_loader, leave=True)
     for batch in loop:
         batch = {k: v.to(device) for k, v in batch.items()}
         outputs = model(**batch)
-        loss = outputs.loss
+        
+        loss = loss_fn(outputs.logits, batch["labels"])
+        
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
         loop.set_description(f"Epoch {epoch+1}")
         loop.set_postfix(loss=loss.item())
-
-#evaluate
+  
+#evaluate     
 model.eval()
 abs_errors = []
 total = 0
@@ -149,6 +185,6 @@ label_preds = [id2label[int(i)] for i in predicted_labels]
 
 test_output = test_df[['id']].copy()
 test_output['label'] = label_preds
-lr_str = f"{lr:.0e}"
-filename = f"results/{model_name}_f{freeze_num}_lr{lr_str}_e{epochs}_predictions.csv"
+filename = f"./results/{model_name}_predictions.csv"
 test_output.to_csv(filename, index=False)
+torch.cuda.empty_cache()
