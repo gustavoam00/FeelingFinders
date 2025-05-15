@@ -19,13 +19,25 @@ from emot.emo_unicode import EMOTICONS_EMO
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from ekphrasis.classes.preprocessor import TextPreProcessor
 from ekphrasis.classes.tokenizer import SocialTokenizer
+from deep_translator import GoogleTranslator
+from langdetect import detect
 
 URL_RE  = re.compile(r'http\S+|www\.\S+', re.I)
 USER_RE = re.compile(r'@\w+')
 BUT_RE  = re.compile(r"\b(but|however|although|though)\b", re.I)
 EMO_RE  = re.compile("|".join(map(re.escape, EMOTICONS_EMO.keys())))
 
+def translate(sentence):
+    lang = 'en'
+    try:
+        lang = detect(sentence)
+    finally:
+        if lang != 'en':
+            sentence = GoogleTranslator(source='auto', target='en').translate(sentence)
+        return sentence
+
 def pre_soft(text: str) -> str:
+    text = translate(text)
     text = URL_RE.sub("HTTPURL", text)
     text = USER_RE.sub("@USER", text)
     return emoji.demojize(text, delimiters=("", "")).strip()
