@@ -61,16 +61,18 @@ if torch.cuda.is_available():
 label2id = {"negative": 0, "neutral": 1, "positive": 2}
 id2label = {v: k for k, v in label2id.items()}
 
-train_df = pd.read_csv("./data/training.csv")
-test_df = pd.read_csv("./data/test.csv")
+#train_df = pd.read_csv("./data/train_soft.csv")
+#test_df = pd.read_csv("./data/test_soft.csv")
+train_df = pd.read_csv("./data/train_hard.csv")
+test_df = pd.read_csv("./data/test_hard.csv")
 
 train_df["label_id"] = train_df["label"].map(label2id)
-train_df['clean_sentence'] = train_df['sentence'].astype(str).apply(preprocess)
+train_df['clean_sentence'] = train_df['sentence'].astype(str)#.apply(preprocess)
 
-test_df['clean_sentence'] = test_df['sentence'].astype(str).apply(preprocess)
+test_df['clean_sentence'] = test_df['sentence'].astype(str)#.apply(preprocess)
 
 #31039 pos and 21910 neg
-train_df = add_backtranslated_data(train_df, pos_num=0, neg_num=0)
+#train_df = add_backtranslated_data(train_df, pos_num=0, neg_num=0)
 train_texts, val_texts, train_labels, val_labels = train_test_split(
     train_df["clean_sentence"].tolist(),
     train_df["label_id"].tolist(),
@@ -89,6 +91,8 @@ MODEL = "vinai/bertweet-large"
 
 #model
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
+special_tokens = {"additional_special_tokens": ["<SARC>", "<AMBIG>"]}
+num_added = tokenizer.add_special_tokens(special_tokens)
 config = AutoConfig.from_pretrained(MODEL)
 model = AutoModelForSequenceClassification.from_pretrained(
     MODEL,
@@ -96,7 +100,7 @@ model = AutoModelForSequenceClassification.from_pretrained(
     id2label=id2label,
     label2id=label2id
 ).to(device)
-
+model.resize_token_embeddings(len(tokenizer))
 base_model = getattr(model, model.base_model_prefix, model.base_model)
 if freeze_num != 0:
     for name, param in base_model.embeddings.named_parameters():
