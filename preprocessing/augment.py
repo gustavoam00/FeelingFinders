@@ -3,7 +3,7 @@ OUT_CSV  = "data/contextual_aug.csv"
 TEXT_COL = "sentence"
 LABEL_COL= "label"
 
-AUG_RATIO = 0.25
+AUG_RATIO = 1
 N_AUG     = 1
 DEVICE    = "cuda" 
 
@@ -14,7 +14,7 @@ from tqdm import tqdm
 df = pd.read_csv(IN_CSV)
 
 ctx_aug = naw.ContextualWordEmbsAug(
-    model_path="microsoft/deberta-v3-base",
+    model_path="FacebookAI/roberta-large",
     action="substitute",
     top_k=10,
     aug_p=0.10,
