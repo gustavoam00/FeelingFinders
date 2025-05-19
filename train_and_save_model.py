@@ -18,6 +18,8 @@ model_names = ["bertweet", "deberta", "bart"]
 MODEL = model_options[0]
 NAME = model_names[0]
 
+SAVE = False
+
 #31039 pos and 21910 neg on og data
 BACKTRANSLATED_POS = "./data/backtranslated_pos.csv"
 NUM_POS = 0
@@ -191,8 +193,9 @@ for epoch in range(EPOCHS):
         loop.set_description(f"Epoch {epoch+1}")
         loop.set_postfix(loss=loss.item())
 
-model.save_pretrained(SAVE_DIR)
-tokenizer.save_pretrained(SAVE_DIR)
+if SAVE:
+    model.save_pretrained(SAVE_DIR)
+    tokenizer.save_pretrained(SAVE_DIR)
  
  
 # Evaluate and save validation logits, labels, IDs, and texts
@@ -223,21 +226,22 @@ with torch.no_grad():
 mean_abs_error = sum(abs_errors) / total
 val_score = 0.5 * (2 - mean_abs_error)
 
-val_logits = np.concatenate(val_logits, axis=0)
-val_labels_all = np.concatenate(val_labels_all, axis=0)
+if SAVE:
+    val_logits = np.concatenate(val_logits, axis=0)
+    val_labels_all = np.concatenate(val_labels_all, axis=0)
+    np.savez(f"{LOGITS_DIR}/eval_logits.npz",
+            logits=val_logits,
+            labels=val_labels_all,
+            ids=val_df['id'].values,
+            texts=val_df['text'].values)
 
-np.savez(f"{LOGITS_DIR}/eval_logits.npz",
-         logits=val_logits,
-         labels=val_labels_all,
-         ids=val_df['id'].values,
-         texts=val_df['text'].values)
+    val_df_out = pd.DataFrame({
+        "id": val_df['id'].values,
+        "text": val_df['text'].values,
+        "label": val_labels_all
+    })
 
-val_df_out = pd.DataFrame({
-    "id": val_df['id'].values,
-    "text": val_df['text'].values,
-    "label": val_labels_all
-})
-val_df_out.to_csv(f"{LOGITS_DIR}/eval_reference.csv", index=False)
+    val_df_out.to_csv(f"{LOGITS_DIR}/eval_reference.csv", index=False)
 
 
 # Predict test labels and save logits and IDs
@@ -253,10 +257,10 @@ with torch.no_grad():
         preds = torch.argmax(outputs.logits, dim=1)
         predicted_labels.extend(preds.cpu().numpy())
 
-test_logits = np.concatenate(test_logits, axis=0)
-test_ids = test_df['id'].values
-
-np.savez(f"{LOGITS_DIR}/test_logits.npz", logits=test_logits, ids=test_ids)
+if SAVE:
+    test_logits = np.concatenate(test_logits, axis=0)
+    test_ids = test_df['id'].values
+    np.savez(f"{LOGITS_DIR}/test_logits.npz", logits=test_logits, ids=test_ids)
 
 
 label_preds = [id2label[int(i)] for i in predicted_labels]
