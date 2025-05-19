@@ -3,7 +3,7 @@ OUT_CSV  = "data/contextual_aug.csv"
 TEXT_COL = "sentence"
 LABEL_COL= "label"
 
-AUG_RATIO = 0.50  
+AUG_RATIO = 0.25
 N_AUG     = 1
 DEVICE    = "cuda" 
 
@@ -14,7 +14,7 @@ from tqdm import tqdm
 df = pd.read_csv(IN_CSV)
 
 ctx_aug = naw.ContextualWordEmbsAug(
-    model_path="vinai/bertweet-large",
+    model_path="microsoft/deberta-v3-base",
     action="substitute",
     top_k=10,
     aug_p=0.10,
@@ -35,4 +35,4 @@ for r in tqdm(df.itertuples(index=False), total=len(df)):
             })
 
 pd.DataFrame(rows).to_csv(OUT_CSV, index=False)
-print(f"✓ wrote {len(rows)} augmented rows → {OUT_CSV}")
+print(f"wrote {len(rows)} augmented rows → {OUT_CSV}")
