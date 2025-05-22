@@ -5,76 +5,138 @@ from tqdm import tqdm
 from torch.optim import AdamW
 from torch.nn import CrossEntropyLoss
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, AutoConfig
 import time
 import os
+import sys
 
+if len(sys.argv) > 1:
+    IDX = int(sys.argv[1])
+else:
+    IDX = 0
+    
 start_time = time.time()
 
-model_options = ["vinai/bertweet-large", "microsoft/deberta-v3-large", "facebook/bart-large"]
-model_names = ["bertweet", "deberta", "bart"]
-MODEL = model_options[0]
-NAME = model_names[0]
+ORIG_LABEL_NEG = 0
+ORIG_LABEL_NEU = 1
+ORIG_LABEL_POS = 2
 
-SAVE = False
+EXPERT_CONFIGS = [
+    {
+        "name": "Embedder_NeuVsNegVsPos",
+        "original_labels_to_keep": [ORIG_LABEL_NEG, ORIG_LABEL_NEU, ORIG_LABEL_POS],
+        "relabel_map": {ORIG_LABEL_NEU: 1, ORIG_LABEL_NEG: 0, ORIG_LABEL_POS: 2},
+        "num_classes": 3,
+        "id2label_new": {0: "Negative", 1: "Neutral", 2: "Positive"},
+        "label2id_new": {"Negative": 0, "Neutral": 1, "Positive": 2},
+        "add_pos": False,
+        "add_neg": False,
+    },
+    {
+        "name": "Embedder_PosVsNotPos",
+        "original_labels_to_keep": [ORIG_LABEL_NEG, ORIG_LABEL_NEU, ORIG_LABEL_POS],
+        "relabel_map": {ORIG_LABEL_POS: 1, ORIG_LABEL_NEG: 0, ORIG_LABEL_NEU: 0},
+        "num_classes": 2,
+        "id2label_new": {0: "Not_Positive", 1: "Positive"},
+        "label2id_new": {"Not_Positive": 0, "Positive": 1},
+        "add_pos": False,
+        "add_neg": False,
+    },
+    {
+        "name": "Embedder_NegVsNotNeg",
+        "original_labels_to_keep": [ORIG_LABEL_NEG, ORIG_LABEL_NEU, ORIG_LABEL_POS],
+        "relabel_map": {ORIG_LABEL_NEG: 1, ORIG_LABEL_POS: 0, ORIG_LABEL_NEU: 0},
+        "num_classes": 2,
+        "id2label_new": {0: "Not_Negative", 1: "Negative"},
+        "label2id_new": {"Not_Negative": 0, "Negative": 1},
+        "add_pos": False,
+        "add_neg": False,
+    },
+    {
+        "name": "Embedder_NeuVsNotNeu",
+        "original_labels_to_keep": [ORIG_LABEL_NEG, ORIG_LABEL_NEU, ORIG_LABEL_POS],
+        "relabel_map": {ORIG_LABEL_NEU: 1, ORIG_LABEL_NEG: 0, ORIG_LABEL_POS: 0},
+        "num_classes": 2,
+        "id2label_new": {0: "Not_Neutral", 1: "Neutral"},
+        "label2id_new": {"Not_Neutral": 0, "Neutral": 1},
+        "add_pos": False,
+        "add_neg": False,
+    },
+    {
+        "name": "Embedder_extraPosVsNotPos",
+        "original_labels_to_keep": [ORIG_LABEL_NEG, ORIG_LABEL_NEU, ORIG_LABEL_POS],
+        "relabel_map": {ORIG_LABEL_POS: 1, ORIG_LABEL_NEG: 0, ORIG_LABEL_NEU: 0},
+        "num_classes": 2,
+        "id2label_new": {0: "Not_Positive", 1: "Positive"},
+        "label2id_new": {"Not_Positive": 0, "Positive": 1},
+        "add_pos": True,
+        "add_neg": False,
+    },
+    {
+        "name": "Embedder_extraNegVsNotNeg",
+        "original_labels_to_keep": [ORIG_LABEL_NEG, ORIG_LABEL_NEU, ORIG_LABEL_POS],
+        "relabel_map": {ORIG_LABEL_NEG: 1, ORIG_LABEL_POS: 0, ORIG_LABEL_NEU: 0},
+        "num_classes": 2,
+        "id2label_new": {0: "Not_Negative", 1: "Negative"},
+        "label2id_new": {"Not_Negative": 0, "Negative": 1},
+        "add_pos": False,
+        "add_neg": True,
+    },
+]
+EXPERT = EXPERT_CONFIGS[IDX]
+
+MODEL = "microsoft/deberta-v3-large"
+NAME = EXPERT["name"]
+
+SAVE = True
 
 #31039 pos and 21910 neg on og data
 BACKTRANSLATED_POS = "./data/backtranslated_pos.csv"
-NUM_POS = 0
 BACKTRANSLATED_NEG = "./data/backtranslated_neg.csv"
-NUM_NEG = 0
-TRAINING_DATA = "./data/training.csv"
-TEST_DATA = "./data/test.csv"
+CONTEXT_DATA = "./data/contextual_aug_1.csv"
+
+training_sets = ["./data/training.csv", "./data/TRAIN_P_SOFT_2.csv", "./data/TRAIN_P_SOFTPLUS_2.csv", "./data/TRAIN_P_HARD_2.csv"]
+TRAINING_DATA = training_sets[0]
+test_sets = ["./data/test.csv", "./data/TEST_P_SOFT_2.csv", "./data/TEST_P_SOFTPLUS_2.csv", "./data/TEST_P_HARD_2.csv"]
+TEST_DATA = test_sets[0]
 
 OUTPUT_NAME = f"./results/{NAME}_predictions.csv"
-LOG_FILE = f".results/metrics_log.txt"
-SAVE_DIR = f"./saved_models/{NAME}"
+LOG_FILE = f"./results/metrics_log.txt"
 LOGITS_DIR = f"./saved_logits/{NAME}"
 
 #config
 SEED = 42
-EVAL_SIZE = 0.1
+EVAL_SIZE = 0.05
 FREEZE_NUM = 9
 LR =  5e-6
 EPOCHS = 3
 
-os.makedirs(SAVE_DIR, exist_ok=True)
 os.makedirs(LOGITS_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(OUTPUT_NAME), exist_ok=True)
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 #--------------------------------------------------------------------------#
 
-def normalize(text):
-    new_text = []
-    for t in text.split(" "):
-        t = '@user' if t.startswith('@') and len(t) > 1 else t
-        t = 'http' if t.startswith('http') else t
-        new_text.append(t)
-    return " ".join(new_text)
+# def normalize(text):
+#     new_text = []
+#     for t in text.split(" "):
+#         t = '@user' if t.startswith('@') and len(t) > 1 else t
+#         t = 'http' if t.startswith('http') else t
+#         new_text.append(t)
+#     return " ".join(new_text)
 
-def add_backtranslated_data(train_df, pos_num=0, neg_num=0):
-    pos_df = pd.read_csv(BACKTRANSLATED_POS)
-    neg_df = pd.read_csv(BACKTRANSLATED_NEG)
+def prepare_expert_data(df_orig, expert_config):
+    df = df_orig.copy()
+    df = df[df['label_id'].isin(expert_config['original_labels_to_keep'])]
 
-    pos_sampled = pos_df.sample(n=pos_num, random_state=42)
-    neg_sampled = neg_df.sample(n=neg_num, random_state=42)
-
-    aug_df = pd.concat([pos_sampled, neg_sampled], ignore_index=True)
-
-    aug_df['clean_sentence'] = aug_df['sentence'].astype(str).apply(normalize)
-    aug_df['label_id'] = aug_df['label'].map(label2id)
-
-    if not aug_df.empty:
-        aug_df['clean_sentence'] = aug_df['sentence'].astype(str).apply(normalize)
-        aug_df['label_id'] = aug_df['label'].map(label2id)
-        combined_df = pd.concat([train_df, aug_df], ignore_index=True)
-    else:
-        combined_df = train_df
-        
-    return combined_df
+    if 'relabel_map' in expert_config:
+        df['label_id'] = df['label_id'].map(expert_config['relabel_map'])
+        if df['label_id'].isnull().any():
+            print(f"Warning: Null labels found after mapping for expert {expert_config['name']}. Original labels present: {df_orig['label'].unique()}. Dropping affected rows.")
+            df.dropna(subset=['label_id'], inplace=True)
+        df['label_id'] = df['label_id'].astype(int)
+    return df
 
 class SentimentDataset(Dataset):
     def __init__(self, encodings, labels):
@@ -101,62 +163,63 @@ id2label = {v: k for k, v in label2id.items()}
 train_df = pd.read_csv(TRAINING_DATA)
 test_df = pd.read_csv(TEST_DATA)
 
+pos_df = pd.read_csv(BACKTRANSLATED_POS)
+neg_df = pd.read_csv(BACKTRANSLATED_NEG)
+context_df = pd.read_csv(CONTEXT_DATA)
+
 train_df["label_id"] = train_df["label"].map(label2id)
-train_df['clean_sentence'] = train_df['sentence'].astype(str).apply(normalize)
+pos_df['label_id'] = pos_df['label'].map(label2id)
+neg_df['label_id'] = neg_df['label'].map(label2id)
+context_df['label_id'] = context_df['label'].map(label2id)
 
-test_df['clean_sentence'] = test_df['sentence'].astype(str).apply(normalize)
+if EXPERT["add_pos"]:
+    context_pos_df = context_df[context_df['label_id'] == 2].copy()
+    train_df = pd.concat([train_df, pos_df, context_pos_df], ignore_index=True)
+    
+if EXPERT["add_neg"]:
+    context_neg_df = context_df[context_df['label_id'] == 0].copy()
+    train_df = pd.concat([train_df, neg_df, context_neg_df], ignore_index=True)
+    
+train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
+new_train_df = prepare_expert_data(train_df, EXPERT)
 
-train_df = add_backtranslated_data(train_df, pos_num=NUM_POS, neg_num=NUM_NEG)
-train_texts, val_texts, train_labels, val_labels = train_test_split(
-    train_df["clean_sentence"].tolist(),
-    train_df["label_id"].tolist(),
-    test_size=EVAL_SIZE,
-    stratify=train_df["label_id"],
-    random_state=SEED
-)
-test_text = test_df['clean_sentence'].tolist()
-
-val_df = pd.DataFrame({
-    "id": [f"val_{i}" for i in range(len(val_texts))],
-    "text": val_texts,
-    "label": val_labels
-})
-
+train_texts = new_train_df['sentence'].tolist()
+train_labels = new_train_df['label_id'].tolist()
+test_text = test_df['sentence'].tolist()
 
 #model
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
-config = AutoConfig.from_pretrained(MODEL)
-model = AutoModelForSequenceClassification.from_pretrained(
+# config = AutoConfig.from_pretrained(MODEL)
+# model = AutoModelForSequenceClassification.from_pretrained(
+#     MODEL,
+#     num_labels=3,
+#     id2label=id2label,
+#     label2id=label2id
+# ).to(device)
+
+config = AutoConfig.from_pretrained(
     MODEL,
-    num_labels=3,
-    id2label=id2label,
-    label2id=label2id
-).to(device)
+    num_labels=EXPERT["num_classes"],
+    id2label=EXPERT["id2label_new"],
+    label2id=EXPERT["label2id_new"],
+    output_hidden_states=True
+)
+model = AutoModelForSequenceClassification.from_pretrained(MODEL, config=config).to(device)
 
-if NAME == "bart":
-    if FREEZE_NUM != 0:
-        for param in model.model.encoder.embed_tokens.parameters():
+          
+base_model = getattr(model, model.base_model_prefix, model.base_model)
+if FREEZE_NUM != 0:
+    for name, param in base_model.embeddings.named_parameters():
+        param.requires_grad = False
+
+    for i in range(FREEZE_NUM):
+        for param in base_model.encoder.layer[i].parameters():
             param.requires_grad = False
-
-        for i in range(FREEZE_NUM):
-            for param in model.model.encoder.layers[i].parameters():
-                param.requires_grad = False
-else:            
-    base_model = getattr(model, model.base_model_prefix, model.base_model)
-    if FREEZE_NUM != 0:
-        for name, param in base_model.embeddings.named_parameters():
-            param.requires_grad = False
-
-        for i in range(FREEZE_NUM):
-            for param in base_model.encoder.layer[i].parameters():
-                param.requires_grad = False
 
 train_encodings = tokenizer(train_texts, truncation=True, max_length=128, padding=True)
-val_encodings = tokenizer(val_texts, truncation=True, max_length=128, padding=True)
 test_encodings = tokenizer(test_text, truncation=True, max_length=128, padding=True, return_tensors='pt')
 
 train_dataset = SentimentDataset(train_encodings, train_labels)
-val_dataset = SentimentDataset(val_encodings, val_labels)
 test_dataset = torch.utils.data.TensorDataset(
     test_encodings['input_ids'],
     test_encodings['attention_mask']
@@ -165,7 +228,6 @@ test_dataset = torch.utils.data.TensorDataset(
 optimizer = AdamW(model.parameters(), lr=LR)
 
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=64)
 test_loader = DataLoader(test_dataset, batch_size=64)
 
 #train
@@ -176,7 +238,7 @@ class_weights = compute_class_weight(
 )
 class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
 loss_fn = CrossEntropyLoss(weight=class_weights) 
-        
+
 model.train()
 for epoch in range(EPOCHS):
     loop = tqdm(train_loader, leave=True)
@@ -193,74 +255,57 @@ for epoch in range(EPOCHS):
         loop.set_description(f"Epoch {epoch+1}")
         loop.set_postfix(loss=loss.item())
 
-if SAVE:
-    model.save_pretrained(SAVE_DIR)
-    tokenizer.save_pretrained(SAVE_DIR)
- 
- 
-# Evaluate and save validation logits, labels, IDs, and texts
-model.eval()
-abs_errors = []
-total = 0
-val_logits = []
-val_labels_all = []
-
-with torch.no_grad():
-    for batch in val_loader:
-        batch = {k: v.to(device) for k, v in batch.items()}
-        outputs = model(**batch)
-        preds = torch.argmax(outputs.logits, dim=1)
-
-        pred_labels = preds.cpu().tolist()
-        true_labels = batch["labels"].cpu().tolist()
-
-        val_logits.append(outputs.logits.cpu().numpy())
-        val_labels_all.append(batch["labels"].cpu().numpy())
-
-        for pred, true in zip(pred_labels, true_labels):
-            mapped_pred = pred - 1
-            mapped_true = true - 1
-            abs_errors.append(abs(mapped_pred - mapped_true))
-            total += 1
-
-mean_abs_error = sum(abs_errors) / total
-val_score = 0.5 * (2 - mean_abs_error)
-
-if SAVE:
-    val_logits = np.concatenate(val_logits, axis=0)
-    val_labels_all = np.concatenate(val_labels_all, axis=0)
-    np.savez(f"{LOGITS_DIR}/eval_logits.npz",
-            logits=val_logits,
-            labels=val_labels_all,
-            ids=val_df['id'].values,
-            texts=val_df['text'].values)
-
-    val_df_out = pd.DataFrame({
-        "id": val_df['id'].values,
-        "text": val_df['text'].values,
-        "label": val_labels_all
-    })
-
-    val_df_out.to_csv(f"{LOGITS_DIR}/eval_reference.csv", index=False)
-
-
 # Predict test labels and save logits and IDs
 model.eval()
+# model.config.output_hidden_states = True
 predicted_labels = []
 test_logits = []
+test_embeddings = []
 
 with torch.no_grad():
-    for batch in test_loader:
+     for batch in tqdm(test_loader, desc="Running inference on test set"):
         input_ids, attention_mask = [b.to(device) for b in batch]
         outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+
         test_logits.append(outputs.logits.cpu().numpy())
+
+        cls_embeddings = outputs.hidden_states[-1][:, 0, :]
+        test_embeddings.append(cls_embeddings.cpu().numpy())
+
         preds = torch.argmax(outputs.logits, dim=1)
         predicted_labels.extend(preds.cpu().numpy())
 
 if SAVE:
     test_logits = np.concatenate(test_logits, axis=0)
+    test_embeddings = np.concatenate(test_embeddings, axis=0)
     test_ids = test_df['id'].values
-    np.savez(f"{LOGITS_DIR}/test_logits.npz", logits=test_logits, ids=test_ids)
+    np.savez(f"{LOGITS_DIR}/test_outputs.npz", 
+             logits=test_logits, 
+             embeddings=test_embeddings, 
+             ids=test_ids)
+    
+    train_embeddings = []
+    train_logits = []
+    train_labels = []
+    
+    with torch.no_grad():
+        for batch in tqdm(train_loader, desc="Running inference on test set"):
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+            
+            train_logits.append(outputs.logits.cpu().numpy())
+            cls_embeddings = outputs.hidden_states[-1][:, 0, :]
+            train_embeddings.append(cls_embeddings.cpu().numpy())
+            train_labels.extend(batch["labels"].cpu().numpy())
+            
+    train_logits = np.concatenate(train_logits, axis=0)
+    train_embeddings = np.concatenate(train_embeddings, axis=0)
+    train_labels = np.array(train_labels)
+
+    np.savez(f"{LOGITS_DIR}/train_outputs.npz",
+            logits=train_logits,
+            embeddings=train_embeddings,
+            labels=train_labels)
 
 
 label_preds = [id2label[int(i)] for i in predicted_labels]
@@ -274,9 +319,7 @@ end_time = time.time()
 
 with open(LOG_FILE, "a") as f:
     f.write(f"-----------------------------------------\n")
-    f.write(f"{MODEL}\n")
-    f.write(f"Validation Score: {val_score:.4f}\n")
-    f.write(f"Mean Absolute Error: {mean_abs_error:.4f}\n")
+    f.write(f"{NAME}\n")
     f.write(f"Total time: {end_time-start_time}\n")
     
 torch.cuda.empty_cache()
