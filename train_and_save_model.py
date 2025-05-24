@@ -107,7 +107,7 @@ LOGITS_DIR = f"./saved_logits/{NAME}"
 
 #config
 SEED = 42
-EVAL_SIZE = 0.05
+EVAL_SIZE = 0
 FREEZE_NUM = 9
 LR =  5e-6
 EPOCHS = 3
@@ -117,14 +117,6 @@ os.makedirs(os.path.dirname(OUTPUT_NAME), exist_ok=True)
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 #--------------------------------------------------------------------------#
-
-# def normalize(text):
-#     new_text = []
-#     for t in text.split(" "):
-#         t = '@user' if t.startswith('@') and len(t) > 1 else t
-#         t = 'http' if t.startswith('http') else t
-#         new_text.append(t)
-#     return " ".join(new_text)
 
 def prepare_expert_data(df_orig, expert_config):
     df = df_orig.copy()
@@ -152,9 +144,9 @@ class SentimentDataset(Dataset):
 
 tqdm.pandas()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.manual_seed(42)
+torch.manual_seed(SEED)
 if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
+    torch.cuda.manual_seed_all(SEED)
 
 #data
 label2id = {"negative": 0, "neutral": 1, "positive": 2}
@@ -179,8 +171,7 @@ if EXPERT["add_pos"]:
 if EXPERT["add_neg"]:
     context_neg_df = context_df[context_df['label_id'] == 0].copy()
     train_df = pd.concat([train_df, neg_df, context_neg_df], ignore_index=True)
-    
-train_df = train_df.sample(frac=1, random_state=42).reset_index(drop=True)
+
 new_train_df = prepare_expert_data(train_df, EXPERT)
 
 train_texts = new_train_df['sentence'].tolist()
@@ -286,26 +277,37 @@ if SAVE:
     
     train_embeddings = []
     train_logits = []
-    train_labels = []
+    saved_train_labels = []
+    
+    train2_df = pd.read_csv(TRAINING_DATA)
+    train2_df["label_id"] = train2_df["label"].map(label2id)
+    new_train2_df = prepare_expert_data(train2_df, EXPERT)
+    train2_texts = new_train2_df['sentence'].tolist()
+    train2_labels = new_train2_df['label_id'].tolist()
+    train2_encodings = tokenizer(train2_texts, truncation=True, max_length=128, padding=True)
+    train2_dataset = SentimentDataset(train2_encodings, train2_labels)
+    train2_loader = DataLoader(train2_dataset, batch_size=16, shuffle=False)
     
     with torch.no_grad():
-        for batch in tqdm(train_loader, desc="Running inference on test set"):
+        for batch in tqdm(train2_loader, desc="Running inference on train set"):
             batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
             
             train_logits.append(outputs.logits.cpu().numpy())
             cls_embeddings = outputs.hidden_states[-1][:, 0, :]
             train_embeddings.append(cls_embeddings.cpu().numpy())
-            train_labels.extend(batch["labels"].cpu().numpy())
+            saved_train_labels.extend(batch["labels"].cpu().numpy())
             
     train_logits = np.concatenate(train_logits, axis=0)
     train_embeddings = np.concatenate(train_embeddings, axis=0)
-    train_labels = np.array(train_labels)
+    saved_train_labels = np.array(saved_train_labels)
+    train_ids = new_train2_df['id'].values
 
     np.savez(f"{LOGITS_DIR}/train_outputs.npz",
             logits=train_logits,
             embeddings=train_embeddings,
-            labels=train_labels)
+            labels=saved_train_labels,
+            ids=train_ids)
 
 
 label_preds = [id2label[int(i)] for i in predicted_labels]
@@ -323,19 +325,3 @@ with open(LOG_FILE, "a") as f:
     f.write(f"Total time: {end_time-start_time}\n")
     
 torch.cuda.empty_cache()
-
-# # Load val data
-# val_data = np.load(f"{SAVE_DIR}/val_logits.npz")
-# val_logits = val_data['logits']
-# val_labels = val_data['labels']
-# val_ids = val_data['ids']
-
-# # Load test data
-# test_data = np.load(f"{SAVE_DIR}/test_logits.npz")
-# test_logits = test_data['logits']
-# test_ids = test_data['ids']
-
-# # Load saved model
-# model = AutoModelForSequenceClassification.from_pretrained(SAVE_DIR).to(device)
-# tokenizer = AutoTokenizer.from_pretrained(SAVE_DIR)
-# model.eval()
