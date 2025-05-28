@@ -108,7 +108,6 @@ LOGITS_DIR = f"./saved_logits/{NAME}"
 
 #config
 SEED = 42
-EVAL_SIZE = 0
 FREEZE_NUM = 9
 LR =  5e-6
 EPOCHS = 3
