@@ -1,3 +1,5 @@
+import os
+import time
 import torch
 import pandas as pd
 import numpy as np
@@ -7,21 +9,16 @@ from torch.nn import CrossEntropyLoss
 from torch.utils.data import Dataset, DataLoader
 from sklearn.utils.class_weight import compute_class_weight
 from transformers import AutoModelForSequenceClassification, AutoTokenizer, AutoConfig
-import time
-import os
-import sys
 
-if len(sys.argv) > 1:
-    IDX = int(sys.argv[1])
-else:
-    IDX = 0
-    
+
+#CONFIG
 start_time = time.time()
 
 ORIG_LABEL_NEG = 0
 ORIG_LABEL_NEU = 1
 ORIG_LABEL_POS = 2
 
+#Model experts
 EXPERT_CONFIGS = [
     {
         "name": "Embedder_NeuVsNegVsPos",
@@ -84,21 +81,25 @@ EXPERT_CONFIGS = [
         "add_neg": True,
     },
 ]
+
+IDX = 0
 EXPERT = EXPERT_CONFIGS[IDX]
 
 MODEL = "microsoft/deberta-v3-large"
 NAME = EXPERT["name"]
 
-SAVE = True
+SAVE_LOGITS_TEST = True
+SAVE_EMBEDDINGS_TEST = False
+SAVE_LOGITS_TRAIN = False
+SAVE_EMBEDDINGS_TRAIN = False
 
-#31039 pos and 21910 neg on og data
 BACKTRANSLATED_POS = "./data/backtranslated_pos.csv"
 BACKTRANSLATED_NEG = "./data/backtranslated_neg.csv"
 CONTEXT_DATA = "./data/contextual_aug_1.csv"
 
-training_sets = ["./data/training.csv", "./data/TRAIN_P_SOFT_2.csv", "./data/TRAIN_P_SOFTPLUS_2.csv", "./data/TRAIN_P_HARD_2.csv"]
+training_sets = ["./data/training.csv", "./data/TRAIN_P_SOFT.csv", "./data/TRAIN_P_SOFTPLUS.csv", "./data/TRAIN_P_HARD.csv"]
 TRAINING_DATA = training_sets[0]
-test_sets = ["./data/test.csv", "./data/TEST_P_SOFT_2.csv", "./data/TEST_P_SOFTPLUS_2.csv", "./data/TEST_P_HARD_2.csv"]
+test_sets = ["./data/test.csv", "./data/TEST_P_SOFT.csv", "./data/TEST_P_SOFTPLUS.csv", "./data/TEST_P_HARD.csv"]
 TEST_DATA = test_sets[0]
 
 OUTPUT_NAME = f"./results/{NAME}_predictions.csv"
@@ -116,9 +117,18 @@ os.makedirs(LOGITS_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(OUTPUT_NAME), exist_ok=True)
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
+tqdm.pandas()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
 #--------------------------------------------------------------------------#
 
 def prepare_expert_data(df_orig, expert_config):
+    """
+    Helper function that relabels data based on whihc expert it is training
+    """
     df = df_orig.copy()
     df = df[df['label_id'].isin(expert_config['original_labels_to_keep'])]
 
@@ -141,12 +151,7 @@ class SentimentDataset(Dataset):
     def __len__(self):
         return len(self.labels)
 
-
-tqdm.pandas()
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
+#--------------------------------------------------------------------------#
 
 #data
 label2id = {"negative": 0, "neutral": 1, "positive": 2}
@@ -164,11 +169,11 @@ pos_df['label_id'] = pos_df['label'].map(label2id)
 neg_df['label_id'] = neg_df['label'].map(label2id)
 context_df['label_id'] = context_df['label'].map(label2id)
 
-if EXPERT["add_pos"]:
+if EXPERT["add_pos"]: #augmented data postive
     context_pos_df = context_df[context_df['label_id'] == 2].copy()
     train_df = pd.concat([train_df, pos_df, context_pos_df], ignore_index=True)
     
-if EXPERT["add_neg"]:
+if EXPERT["add_neg"]: #augmented data negative
     context_neg_df = context_df[context_df['label_id'] == 0].copy()
     train_df = pd.concat([train_df, neg_df, context_neg_df], ignore_index=True)
 
@@ -177,6 +182,8 @@ new_train_df = prepare_expert_data(train_df, EXPERT)
 train_texts = new_train_df['sentence'].tolist()
 train_labels = new_train_df['label_id'].tolist()
 test_text = test_df['sentence'].tolist()
+
+#--------------------------------------------------------------------------#
 
 #model
 tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -187,7 +194,6 @@ tokenizer = AutoTokenizer.from_pretrained(MODEL)
 #     id2label=id2label,
 #     label2id=label2id
 # ).to(device)
-
 config = AutoConfig.from_pretrained(
     MODEL,
     num_labels=EXPERT["num_classes"],
@@ -197,7 +203,7 @@ config = AutoConfig.from_pretrained(
 )
 model = AutoModelForSequenceClassification.from_pretrained(MODEL, config=config).to(device)
 
-          
+# freeze a num of layers sequentially 
 base_model = getattr(model, model.base_model_prefix, model.base_model)
 if FREEZE_NUM != 0:
     for name, param in base_model.embeddings.named_parameters():
@@ -207,6 +213,7 @@ if FREEZE_NUM != 0:
         for param in base_model.encoder.layer[i].parameters():
             param.requires_grad = False
 
+#tokenizes data and loads it
 train_encodings = tokenizer(train_texts, truncation=True, max_length=128, padding=True)
 test_encodings = tokenizer(test_text, truncation=True, max_length=128, padding=True, return_tensors='pt')
 
@@ -216,10 +223,10 @@ test_dataset = torch.utils.data.TensorDataset(
     test_encodings['attention_mask']
 )
 
-optimizer = AdamW(model.parameters(), lr=LR)
-
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=64)
+
+#--------------------------------------------------------------------------#
 
 #train
 class_weights = compute_class_weight(
@@ -228,7 +235,8 @@ class_weights = compute_class_weight(
     y=train_labels
 )
 class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
-loss_fn = CrossEntropyLoss(weight=class_weights) 
+loss_fn = CrossEntropyLoss(weight=class_weights) #balances classes using weighted loss
+optimizer = AdamW(model.parameters(), lr=LR)
 
 model.train()
 for epoch in range(EPOCHS):
@@ -246,13 +254,15 @@ for epoch in range(EPOCHS):
         loop.set_description(f"Epoch {epoch+1}")
         loop.set_postfix(loss=loss.item())
 
+#--------------------------------------------------------------------------#
+
 # Predict test labels and save logits and IDs
 model.eval()
-# model.config.output_hidden_states = True
 predicted_labels = []
-test_logits = []
 test_embeddings = []
+test_logits = []
 
+# Runs inference on the test set
 with torch.no_grad():
      for batch in tqdm(test_loader, desc="Running inference on test set"):
         input_ids, attention_mask = [b.to(device) for b in batch]
@@ -266,19 +276,25 @@ with torch.no_grad():
         preds = torch.argmax(outputs.logits, dim=1)
         predicted_labels.extend(preds.cpu().numpy())
 
-if SAVE:
+# Save logits and embeddings of the test set if requested
+save_dict = {"ids": test_df['id'].values}
+if SAVE_LOGITS_TEST:
     test_logits = np.concatenate(test_logits, axis=0)
+    save_dict["logits"] = test_logits
+if SAVE_EMBEDDINGS_TEST:
     test_embeddings = np.concatenate(test_embeddings, axis=0)
-    test_ids = test_df['id'].values
-    np.savez(f"{LOGITS_DIR}/test_outputs.npz", 
-             logits=test_logits, 
-             embeddings=test_embeddings, 
-             ids=test_ids)
+    save_dict["embeddings"] = test_embeddings
+if SAVE_LOGITS_TEST or SAVE_EMBEDDINGS_TEST:
+    np.savez(f"{LOGITS_DIR}/test_outputs.npz", **save_dict)
     
+
+# Save logits and embeddings of the training set if requested
+if SAVE_LOGITS_TRAIN or SAVE_EMBEDDINGS_TRAIN:
     train_embeddings = []
     train_logits = []
     saved_train_labels = []
     
+    #Reloads original original training data to run inference on it
     train2_df = pd.read_csv(TRAINING_DATA)
     train2_df["label_id"] = train2_df["label"].map(label2id)
     new_train2_df = prepare_expert_data(train2_df, EXPERT)
@@ -297,21 +313,22 @@ if SAVE:
             cls_embeddings = outputs.hidden_states[-1][:, 0, :]
             train_embeddings.append(cls_embeddings.cpu().numpy())
             saved_train_labels.extend(batch["labels"].cpu().numpy())
-            
-    train_logits = np.concatenate(train_logits, axis=0)
-    train_embeddings = np.concatenate(train_embeddings, axis=0)
-    saved_train_labels = np.array(saved_train_labels)
-    train_ids = new_train2_df['id'].values
+    
+    save_dict = {"ids": new_train2_df['id'].values, "labels": np.array(saved_train_labels)}
 
-    np.savez(f"{LOGITS_DIR}/train_outputs.npz",
-            logits=train_logits,
-            embeddings=train_embeddings,
-            labels=saved_train_labels,
-            ids=train_ids)
+    if SAVE_LOGITS_TRAIN:
+        train_logits = np.concatenate(train_logits, axis=0)
+        save_dict["logits"] = train_logits
+
+    if SAVE_EMBEDDINGS_TRAIN:
+        train_embeddings = np.concatenate(train_embeddings, axis=0)
+        save_dict["embeddings"] = train_embeddings
+
+    np.savez(f"{LOGITS_DIR}/train_outputs.npz", **save_dict)
 
 
+# Model prediciton on the test data
 label_preds = [id2label[int(i)] for i in predicted_labels]
-
 test_output = test_df[['id']].copy()
 test_output['label'] = label_preds
 filename = OUTPUT_NAME
